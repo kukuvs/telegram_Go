@@ -1,8 +1,9 @@
 package telegram
 
 import (
-	"/src/mistral" // Импорт клиента Mistral
 	"log"
+
+	"github.com/kukuvs/telegram_Go/src/mistral" // Импорт клиента Mistral
 
 	"github.com/mymmrac/telego"
 	"github.com/mymmrac/telego/telegoutil"

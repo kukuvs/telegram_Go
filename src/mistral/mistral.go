@@ -15,10 +15,21 @@ type MistralClient struct {
 
 // Запрос на генерацию текста по prompt
 func (client *MistralClient) GenerateText(prompt string) (string, error) {
-	url := "https://api.mistral.ai/v1/endpoint" // Заменить на правильный endpoint
+	url := "https://api.mistral.ai/v1/chat/completions"
 
-	requestBody, err := json.Marshal(map[string]string{
-		"prompt": prompt,
+	script := "отвечай коротко и на русском ели тебя не просят иного при написании кода добавляй полноценные описания функций и классов так же комментарии ( если что-то уже написанно в коде в виде комментария не нужно повторять это ещё раз) старайся как можно точнее вести диалог не сворачивая на другую тему если есть предложения по улучшению того или иного кода или текста говори их и учти то общение происходит через telegram "
+
+	// Формируем тело запроса с правильной структурой
+	requestBody, err := json.Marshal(map[string]interface{}{
+		"model": "mistral-large-latest", // Указываем идентификатор модели
+		"messages": []map[string]string{
+			{
+				"role":    "user",
+				"content": script + prompt,
+			},
+		},
+		"temperature": 0.7,    // Опциональные параметры
+		"max_tokens":  100000, // Ограничение на количество токенов
 	})
 	if err != nil {
 		return "", err

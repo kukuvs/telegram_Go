@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context" // Добавляем пакет для работы с контекстом
 	"log"
 
 	"github.com/kukuvs/telegram_Go/src/config"
@@ -11,8 +12,8 @@ import (
 )
 
 func main() {
-	// Загружаем конфиг из файла
-	cfg, err := config.LoadConfig("../1.txt")
+	// Загружаем конфигурацию из файла
+	cfg, err := config.LoadConfig("./1.txt")
 	if err != nil {
 		log.Fatalf("Error loading config: %v", err)
 	}
@@ -34,6 +35,9 @@ func main() {
 		MistralAPI: mistralClient,
 	}
 
-	// Запускаем обработку сообщений
-	bot.HandleMessages()
+	// Создаем контекст
+	ctx := context.Background() // Можно использовать context.WithCancel или context.WithTimeout для управления временем выполнения
+
+	// Запускаем обработку сообщений с контекстом
+	bot.HandleMessages(ctx)
 }

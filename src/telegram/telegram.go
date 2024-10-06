@@ -6,6 +6,9 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"path/filepath"
+	"strings"
+	"sync"
 
 	"github.com/kukuvs/telegram_Go/src/mistral"
 	"github.com/mymmrac/telego"
@@ -18,110 +21,116 @@ type Bot struct {
 	MistralAPI *mistral.MistralClient
 }
 
-// MistralResponse структура для разбора ответа от Mistral API
-type MistralResponse struct {
-	Choices []struct {
-		Message struct {
-			Content string `json:"content"`
-		} `json:"message"`
-	} `json:"choices"`
-}
-
-// HandleMessages обрабатывает входящие сообщения с использованием Long Polling
+// HandleMessages обрабатывает входящие сообщения
 func (b *Bot) HandleMessages(ctx context.Context) {
-	// Получаем обновления через Long Polling
 	updates, err := b.BotClient.UpdatesViaLongPolling(nil)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("Ошибка получения обновлений: %v", err)
+		return
 	}
 
-	// Обрабатываем каждое обновление
-	for update := range updates {
-		if update.Message != nil {
-			if update.Message.Document != nil {
-				go b.handleDocument(ctx, update) // Асинхронная обработка документа
-			} else {
-				go b.handleTextMessage(ctx, update.Message) // Асинхронная обработка текстового сообщения
+	var wg sync.WaitGroup
+	messageChan := make(chan telego.Update)
+
+	go func() {
+		defer close(messageChan)
+		for update := range updates {
+			if update.Message != nil {
+				messageChan <- update
 			}
 		}
+	}()
+
+	for update := range messageChan {
+		wg.Add(1)
+		go func(update telego.Update) {
+			defer wg.Done()
+			if update.Message.Document != nil {
+				b.handleDocument(ctx, update)
+			} else {
+				b.handleTextMessage(ctx, update.Message)
+			}
+		}(update)
 	}
+
+	wg.Wait()
 }
 
 // handleDocument обрабатывает сообщения с документами
 func (b *Bot) handleDocument(ctx context.Context, update telego.Update) {
 	fileID := update.Message.Document.FileID
-	// Получаем информацию о файле по его FileID
+	fileName := update.Message.Document.FileName
+
+	if !isSupportedFileType(fileName) {
+		b.sendError(update.Message.Chat.ID, "Поддерживаются только .txt файлы", nil)
+		return
+	}
+
 	file, err := b.BotClient.GetFile(&telego.GetFileParams{FileID: fileID})
 	if err != nil {
-		errorMessage := fmt.Sprintf("Ошибка при получении информации о файле: %v", err)
-		b.sendMessage(update.Message.Chat.ID, errorMessage)
+		b.sendError(update.Message.Chat.ID, "Ошибка при получении информации о файле", err)
 		return
 	}
 
-	// Скачиваем файл
 	fileContent, err := b.downloadFile(ctx, file.FilePath)
 	if err != nil {
-		errorMessage := fmt.Sprintf("Ошибка при скачивании файла: %v", err)
-		b.sendMessage(update.Message.Chat.ID, errorMessage)
+		b.sendError(update.Message.Chat.ID, "Ошибка при скачивании файла", err)
 		return
 	}
 
-	// Отправляем содержимое файла пользователю
-	b.sendMessage(update.Message.Chat.ID, string(fileContent))
+	combinedContent := string(fileContent)
+	if update.Message.Caption != "" {
+		combinedContent = update.Message.Caption + "\n" + combinedContent
+	}
+
+	response, err := b.MistralAPI.GenerateText(combinedContent)
+	if err != nil {
+		b.sendError(update.Message.Chat.ID, "Ошибка при запросе к Mistral API", err)
+		return
+	}
+
+	b.sendMessage(update.Message.Chat.ID, response)
 }
 
 // handleTextMessage обрабатывает текстовые сообщения
 func (b *Bot) handleTextMessage(ctx context.Context, message *telego.Message) {
-	// Запрос к Mistral API для генерации ответа
 	response, err := b.MistralAPI.GenerateText(message.Text)
 	if err != nil {
-		errorMessage := fmt.Sprintf("Ошибка при запросе к Mistral API: %v", err)
-		b.sendMessage(message.Chat.ID, errorMessage)
+		b.sendError(message.Chat.ID, "Ошибка при запросе к Mistral API", err)
 		return
 	}
 
-	// Разбиваем длинный ответ на несколько сообщений, если он превышает лимит Telegram
-	b.sendLongMessage(message.Chat.ID, response)
+	b.sendMessage(message.Chat.ID, response)
+}
+
+// isSupportedFileType returns true if the given file name has a supported extension
+func isSupportedFileType(fileName string) bool {
+	fileName = strings.ToLower(fileName)
+	ext := filepath.Ext(fileName)
+	return ext == ".txt"
 }
 
 // downloadFile загружает файл по заданному пути
 func (b *Bot) downloadFile(ctx context.Context, filePath string) ([]byte, error) {
 	fileURL := fmt.Sprintf("https://api.telegram.org/file/bot%s/%s", b.BotClient.Token(), filePath)
 
-	req, err := http.NewRequestWithContext(ctx, "GET", fileURL, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := http.Get(fileURL)
 	if err != nil {
 		return nil, fmt.Errorf("ошибка при запросе файла: %v", err)
 	}
 	defer resp.Body.Close()
 
-	// Чтение содержимого файла
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("ошибка при получении файла: статус %d", resp.StatusCode)
+	}
+
 	return io.ReadAll(resp.Body)
 }
 
-// sendMessage отправляет сообщение в чат
+// sendMessage отправляет сообщение, автоматически разбивая длинные сообщения
 func (b *Bot) sendMessage(chatID int64, content string) {
-	msg := &telego.SendMessageParams{
-		ChatID: telegoutil.ID(chatID),
-		Text:   content,
-	}
-
-	_, err := b.BotClient.SendMessage(msg)
-	if err != nil {
-		log.Printf("Ошибка при отправке сообщения: %v", err)
-	}
-}
-
-// sendLongMessage отправляет длинное сообщение, разбивая его на несколько частей, если необходимо
-func (b *Bot) sendLongMessage(chatID int64, content string) {
-	const maxMessageLength = 4096 // Максимальная длина сообщения в Telegram
-	// Разбиваем сообщение на части, если оно превышает максимальную длину
+	const maxMessageLength = 4096
 	for len(content) > 0 {
-		// Определяем длину текущего сообщения
 		part := content
 		if len(content) > maxMessageLength {
 			part = content[:maxMessageLength]
@@ -130,7 +139,24 @@ func (b *Bot) sendLongMessage(chatID int64, content string) {
 			content = ""
 		}
 
-		// Отправляем каждую часть сообщения
-		b.sendMessage(chatID, part)
+		msg := &telego.SendMessageParams{
+			ChatID: telegoutil.ID(chatID),
+			Text:   part,
+		}
+
+		if _, err := b.BotClient.SendMessage(msg); err != nil {
+			log.Printf("Ошибка при отправке сообщения: %v", err)
+		}
 	}
+}
+
+// sendError отправляет сообщение об ошибке в чат
+func (b *Bot) sendError(chatID int64, message string, err error) {
+	var errorMessage string
+	if err != nil {
+		errorMessage = fmt.Sprintf("%s: %v", message, err)
+	} else {
+		errorMessage = message
+	}
+	b.sendMessage(chatID, errorMessage)
 }

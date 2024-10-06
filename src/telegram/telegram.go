@@ -131,11 +131,12 @@ func (b *Bot) downloadFile(ctx context.Context, filePath string) ([]byte, error)
 func (b *Bot) sendMessage(chatID int64, content string) {
 	const maxMessageLength = 4096
 	for len(content) > 0 {
-		part := content
+		var part string
 		if len(content) > maxMessageLength {
 			part = content[:maxMessageLength]
 			content = content[maxMessageLength:]
 		} else {
+			part = content
 			content = ""
 		}
 
